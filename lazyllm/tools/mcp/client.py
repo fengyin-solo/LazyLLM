@@ -1,9 +1,15 @@
+import asyncio
+import contextlib
 from typing import Any, Optional, Literal
 from urllib.parse import urlparse
-from contextlib import asynccontextmanager
 
-from lazyllm.thirdparty import mcp
-
+from .pool import (
+    PoolOptions,
+    ServerSource,
+    connect_session,
+    get_driver,
+    make_pool_key,
+)
 from .utils import patch_sync
 from .tool_adaptor import generate_lazyllm_tool
 from .deploy import SseServerSettings, start_sse_server
@@ -19,6 +25,12 @@ class MCPClient(object):
         timeout: float = 5,
         transport: Literal['auto', 'stdio', 'sse', 'streamable-http'] = 'auto',
         server_id: str = '',
+        max_connections: int = 8,
+        max_idle_time: float = 300,
+        health_check_interval: float = 30,
+        max_retries: int = 2,
+        retry_backoff_base: float = 0.5,
+        retry_backoff_max: float = 10,
     ):
         self._command_or_url = command_or_url
         self._args = args or []
@@ -27,6 +39,12 @@ class MCPClient(object):
         self._timeout = timeout
         self._transport = transport
         self.server_id = server_id
+        self._max_connections = max_connections
+        self._max_idle_time = max_idle_time
+        self._health_check_interval = health_check_interval
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
 
     def _resolve_transport(self) -> str:
         if self._transport != 'auto':
@@ -35,76 +53,59 @@ class MCPClient(object):
             return 'streamable-http'
         return 'stdio'
 
-    @asynccontextmanager
-    async def _run_session(self):
-        transport = self._resolve_transport()
+    def _pool_key(self):
+        return make_pool_key(
+            server_id=self.server_id,
+            transport=self._resolve_transport(),
+            target=self._command_or_url,
+            args=self._args,
+            env=self._env,
+            headers=self._headers,
+        )
 
-        if transport == 'stdio':
-            server_parameters = mcp.StdioServerParameters(
-                command=self._command_or_url, args=self._args, env=self._env
-            )
-            async with mcp.stdio_client(server_parameters) as (read_stream, write_stream):
-                async with mcp.ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    yield session
-        elif transport == 'streamable-http':
-            import importlib.util
-            spec = importlib.util.find_spec('mcp.client.streamable_http')
-            if spec is None:
-                raise ImportError(
-                    'Please install mcp to use mcp module. '
-                    'You can install it with `pip install mcp`'
-                )
-            streamable_http_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(streamable_http_module)
-            streamable_http_client = streamable_http_module.streamable_http_client
-            create_mcp_http_client = streamable_http_module.create_mcp_http_client
+    def _pool_options(self) -> PoolOptions:
+        return PoolOptions(
+            max_connections=self._max_connections,
+            max_idle_time=self._max_idle_time,
+            health_check_interval=self._health_check_interval,
+            max_retries=self._max_retries,
+            backoff_base=self._retry_backoff_base,
+            backoff_max=self._retry_backoff_max,
+        )
 
-            async with create_mcp_http_client(
-                headers=self._headers or None,
-                # Let the MCP SDK construct its own timeout object. Some
-                # releases vendor httpx as httpx2, which cannot consume a
-                # Timeout instance created by LazyLLM's httpx shim.
-                timeout=self._timeout,
-            ) as http_client:
-                async with streamable_http_client(
-                    url=self._command_or_url,
-                    http_client=http_client,
-                ) as streams:
-                    # mcp SDK releases have returned both a 2-tuple and a
-                    # 3-tuple here. Only the read/write streams are required.
-                    read_stream, write_stream = streams[:2]
-                    async with mcp.ClientSession(read_stream, write_stream) as session:
-                        await session.initialize()
-                        yield session
-        else:  # 'sse'
-            import importlib.util
-            spec = importlib.util.find_spec('mcp.client.sse')
-            if spec is None:
-                raise ImportError(
-                    'Please install mcp to use mcp module. '
-                    'You can install it with `pip install mcp`'
-                )
-            sse_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(sse_module)
-            sse_client = sse_module.sse_client
+    def _submit_to_driver(self, factory):
+        driver = get_driver()
+        loop = driver.ensure_started()
+        return asyncio.run_coroutine_threadsafe(factory(), loop)
 
-            async with sse_client(
-                url=self._command_or_url,
-                headers=self._headers,
-                timeout=self._timeout,
-            ) as (read_stream, write_stream):
-                async with mcp.ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    yield session
-
-    async def call_tool(self, tool_name: str, arguments: dict):
-        async with self._run_session() as session:
-            return await session.call_tool(tool_name, arguments)
+    async def call_tool(self, tool_name: str, arguments: dict,
+                        timeout: Optional[float] = None):
+        call_timeout = timeout if timeout is not None else self._timeout
+        key = self._pool_key()
+        options = self._pool_options()
+        future = self._submit_to_driver(lambda: get_driver().execute_call_tool(
+            key=key,
+            env=self._env,
+            headers=self._headers,
+            client_timeout=self._timeout,
+            options=options,
+            tool_name=tool_name,
+            arguments=arguments,
+            call_timeout=call_timeout,
+        ))
+        return await asyncio.wrap_future(future)
 
     async def list_tools(self):
-        async with self._run_session() as session:
-            return await session.list_tools()
+        key = self._pool_key()
+        options = self._pool_options()
+        future = self._submit_to_driver(lambda: get_driver().execute_list_tools(
+            key=key,
+            env=self._env,
+            headers=self._headers,
+            client_timeout=self._timeout,
+            options=options,
+        ))
+        return await asyncio.wrap_future(future)
 
     async def aget_tools(self, allowed_tools: list[str] = None):
         res = await self.list_tools()
@@ -118,5 +119,20 @@ class MCPClient(object):
         return patch_sync(self.aget_tools)(allowed_tools=allowed_tools)
 
     async def deploy(self, sse_settings: SseServerSettings):
-        async with self._run_session() as session:
+        source = ServerSource(
+            server_id=self.server_id,
+            transport=self._resolve_transport(),
+            target=self._command_or_url,
+            args=tuple(self._args),
+        )
+        stack, session = await connect_session(
+            source=source,
+            env=self._env,
+            headers=self._headers,
+            client_timeout=self._timeout,
+        )
+        try:
             await start_sse_server(session, sse_settings)
+        finally:
+            with contextlib.suppress(Exception):
+                await stack.aclose()
