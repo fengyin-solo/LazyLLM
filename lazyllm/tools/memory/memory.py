@@ -1,5 +1,6 @@
-from .supplier import MemUMemory, Mem0Memory, PowerMemMemory
+from .supplier import MemUMemory, Mem0Memory, PowerMemMemory, LocalMemory
 from .base import LazyLLMMemoryBase
+from lazyllm import globals
 from typing import Optional
 import lazyllm
 
@@ -7,13 +8,18 @@ import lazyllm
 class Memory():
     SUPPLIERS = {'memu': MemUMemory,
                  'mem0': Mem0Memory,
-                 'powermem': PowerMemMemory}
+                 'powermem': PowerMemMemory,
+                 'local': LocalMemory}
+    _EXTERNAL_API_KEYS = ('memu_api_key', 'mem0_api_key')
 
     def __new__(cls, source: Optional[str] = None, *args, **kwargs) -> LazyLLMMemoryBase:
         if source is None:
-            for source in Memory.SUPPLIERS.keys():
-                if lazyllm.config[f'{source}_api_key']: break
-            else: raise ValueError(f'No memory supplier found, please set LAZYLLM_{source.upper()}_API_KEY env variable')
+            for key in cls._EXTERNAL_API_KEYS:
+                if lazyllm.config[key]:
+                    source = key.rsplit('_api_key', 1)[0]
+                    break
+            else:
+                source = 'local'
         return cls.SUPPLIERS[source](*args, **kwargs)
 
 
