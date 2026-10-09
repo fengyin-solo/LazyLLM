@@ -54,7 +54,8 @@ if TYPE_CHECKING:
     from .actors import ParameterExtractor, QustionRewrite, CodeGenerator
     from .eval import (BaseEvaluator, ResponseRelevancy, Faithfulness, LLMContextRecall,
                     NonLLMContextRecall, ContextRelevance)
-    from .http_request import HttpRequest, HttpExecutorResponse
+    from .http_request import (HttpRequest, HttpExecutorResponse, RetryConfig,
+                               HttpRequestError, HttpResponseTooLargeError)
     from .data import data_register
     from .review import get_errors, ChineseCorrector
     from .git import (LazyLLMGitBase, PrInfo, ReviewCommentInfo, Git,
@@ -170,7 +171,10 @@ _SUBMOD_MAP = {
     ],
     'http_request': [
         'HttpRequest',
-        'HttpExecutorResponse'
+        'HttpExecutorResponse',
+        'RetryConfig',
+        'HttpRequestError',
+        'HttpResponseTooLargeError'
     ],
     'data': [
         'data_register'

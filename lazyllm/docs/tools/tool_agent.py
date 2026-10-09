@@ -1923,7 +1923,7 @@ add_example('ContextRelevance', ['''\
 add_chinese_doc('HttpRequest', '''\
 通用 HTTP 请求执行器。
 
-该类用于构建并发送 HTTP 请求，支持变量替换、API Key 注入、JSON 或表单编码、文件类型响应识别等功能。
+该类用于构建并发送 HTTP 请求，支持变量替换、API Key 注入、JSON 或表单编码、文件类型响应识别，以及可选的失败自动重试与响应归一化能力。
 
 Args:
     method (str): HTTP 方法，如 'GET'、'POST' 等。
@@ -1934,12 +1934,20 @@ Args:
     body (Union[str, dict]): 请求体，支持字符串或 JSON 字典格式。
     timeout (int): 请求超时时间（秒）。
     proxies (dict, optional): 可选的代理设置。
+    retry (optional): 重试配置。默认 None 表示禁用，保持单次请求并返回旧结构
+        {'status_code', 'content', 'headers', 'file'}；可传 True 使用默认 RetryConfig，
+        或传入 RetryConfig / dict 自定义。启用后仅对幂等方法（GET/HEAD/PUT/DELETE/OPTIONS）
+        的超时、网络错误及可重试状态码（默认 408/429/500/502/503/504）重试，响应归一化为
+        {'status_code', 'content_type', 'headers', 'text', 'json', 'file'}，最终失败抛出
+        带尝试元数据的 HttpRequestError。
+    max_download_bytes (int, optional): 归一化模式下允许下载的最大响应字节数，默认 50MB，
+        超出时抛出 HttpResponseTooLargeError；设为 None 表示不限制。
 ''')
 
 add_english_doc('HttpRequest', '''\
 General HTTP request executor.
 
-This class builds and sends HTTP requests with support for dynamic variable substitution, API key injection, JSON or form data encoding, and file-aware response parsing.
+This class builds and sends HTTP requests with support for dynamic variable substitution, API key injection, JSON or form data encoding, file-aware response parsing, and optional automatic retries with normalized responses.
 
 Args:
     method (str): HTTP method, such as 'GET', 'POST', etc.
@@ -1950,6 +1958,16 @@ Args:
     body (Union[str, dict]): HTTP request body (raw string or JSON-formatted dict).
     timeout (int): Timeout duration for the request (in seconds).
     proxies (dict, optional): Proxy settings for the request, if needed.
+    retry (optional): Retry configuration. Defaults to None (disabled): a single request is
+        sent and the legacy {'status_code', 'content', 'headers', 'file'} mapping is returned.
+        Pass True for the default RetryConfig, or a RetryConfig / dict for customization.
+        When enabled, only idempotent methods (GET/HEAD/PUT/DELETE/OPTIONS) are retried, and
+        only on timeouts, network errors or retryable status codes (408/429/500/502/503/504
+        by default). Responses are normalized to
+        {'status_code', 'content_type', 'headers', 'text', 'json', 'file'}; a final failure
+        raises HttpRequestError carrying per-attempt metadata.
+    max_download_bytes (int, optional): Maximum response size in bytes in normalized mode
+        (50MB by default); exceeding it raises HttpResponseTooLargeError. Set None for no limit.
 ''')
 
 add_example('HttpRequest', ['''\
